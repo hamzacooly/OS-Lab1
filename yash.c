@@ -13,9 +13,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <string.h>
-
-int pipefd[2];
-int pid_ch1, pid_ch2, pid;
+#include <errno.h>
 
 typedef struct process *Process;
 typedef struct job *Job;
@@ -32,14 +30,7 @@ struct job {
     pid_t other;		/* subjob id (SUPERJOB)
 				 * or subshell pid (SUBJOB) */
     int stat;                   /* see STATs below                   */
-    char *pwd;			/* current working dir of shell when *
-				 * this job was spawned              */
     struct process *procs;	/* list of processes                 */
-    struct process *auxprocs;	/* auxiliary processes e.g multios   */
-    LinkList filelist;		/* list of files to delete when done */
-				/* elements are struct jobfile */
-    int stty_in_env;		/* if STTY=... is present            */
-    struct ttyinfo *ty;		/* the modes specified by STTY       */
 };
 
 // static void sig_int(int signo) {
@@ -63,10 +54,114 @@ void builtins(char* cmd){
     }
 }
 
+// void redirects(int type, char* before[], char* file){
+//     if(type == 0){ // "<"
+//         int inputfd = open(file, O_RDONLY);
+//         if(errno == ENOENT){
+//             printf("Error opening file.\n");
+//             exit(1);
+//         }
+//         else{
+//             dup2(inputfd, STDIN_FILENO);
+//         }
+//     }
+//     else if(type == 1){ // ">"
+
+//     }
+//     else if(type == 2){ // "2>"
+
+//     }
+// }
+
 void eval_cmds(int len, int maxlen, char* arr[len][maxlen]){
+    int status;
     int i;
+    int inputfd, outputfd, errfd;
+    int pipefd[2];
+    int pid_ch1, pid_ch2, pid;
+    int bg = 0;
+    if(strcmp(arr[len-2][0], "&") == 0)
+        bg = 1;
+    int pipe_index = -1;
     for(i = 0; i < len; i++){
-        
+        if(arr[i][0] == NULL)
+            break;
+        if(strcmp(arr[i][0],"|") == 0)
+            pipe_index = i;
+    }
+    if(pipe_index < 0){ // No pipe in the job
+        pid_t cpid = fork();
+        if(cpid == 0){
+            for(i = 0; i < len; i++){
+                if(arr[i][0] == NULL)
+                    break;
+                if(strcmp(arr[i][0],"<") == 0){
+                    inputfd = open(arr[i+1][0], O_RDONLY);
+                    if(errno == ENOENT){
+                        printf("Error opening file.\n");
+                        exit(1);
+                    }
+                    else{
+                        dup2(inputfd, STDIN_FILENO);
+                    }
+                }
+                if(strcmp(arr[i][0],">") == 0){
+                    outputfd = open(arr[i+1][0], O_CREAT | O_WRONLY, S_IRGRP | S_IRUSR | S_IWGRP | S_IWUSR);
+                    dup2(outputfd, STDOUT_FILENO);
+                }
+                if(strcmp(arr[i][0],"2>") == 0){
+                    errfd = open(arr[i+1][0], O_CREAT | O_WRONLY, S_IRGRP | S_IRUSR | S_IWGRP | S_IWUSR);
+                    dup2(errfd, STDERR_FILENO);
+                }
+            }
+            execvp(arr[0][0], arr[0]);
+        }
+        else{
+            wait(&status);
+        }
+    }
+    else{ // 1 pipe in the job
+        if (pipe(pipefd) != 0){
+            printf("Messed up pipe\n");
+            exit(1);
+        }
+        pid_t cpid = fork();
+        if(cpid == 0){
+            for(i = 0; i < len; i++){
+                if(arr[i][0] == NULL)
+                    break;
+                if(strcmp(arr[i][0],"<") == 0){
+                    inputfd = open(arr[i+1][0], O_RDONLY);
+                    if(errno == ENOENT){
+                        printf("Error opening file.\n");
+                        exit(1);
+                    }
+                    else{
+                        dup2(inputfd, STDIN_FILENO);
+                    }
+                }
+                if(strcmp(arr[i][0],">") == 0){
+                    outputfd = open(arr[i+1][0], O_CREAT | O_WRONLY, S_IRGRP | S_IRUSR | S_IWGRP | S_IWUSR);
+                    dup2(outputfd, STDOUT_FILENO);
+                }
+                if(strcmp(arr[i][0],"2>") == 0){
+                    errfd = open(arr[i+1][0], O_CREAT | O_WRONLY, S_IRGRP | S_IRUSR | S_IWGRP | S_IWUSR);
+                    dup2(errfd, STDERR_FILENO);
+                }
+            }
+            dup2(pipefd[1], 1);
+            close(pipefd[0]);
+            
+        }
+        else{
+            pid_t cpid2 = fork();
+            if(cpid2 == 0){
+
+            }
+            else{
+
+            }
+        }
     }
 }
 
@@ -180,7 +275,6 @@ void prompt(void){
 }
 
 int main (void) {
-    int status;
     while(1){
         prompt();
     }
