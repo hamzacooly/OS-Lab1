@@ -15,73 +15,68 @@
 #include <string.h>
 #include <errno.h>
 
-typedef struct process *Process;
 typedef struct job *Job;
 
 struct process {
-    struct process *next;
-    pid_t pid;                  /* process id                       */
-    char text[2000];	/* text to print when 'jobs' is run */
-    int status;			/* return code from waitpid */
+    pid_t pid;
+    int status; // Return code from waitpid
+    int stopped;
+    int completed;
 };
 
 struct job {
-    pid_t gleader;		/* process group leader of this job  */
-    pid_t other;		/* subjob id (SUPERJOB)
-				 * or subshell pid (SUBJOB) */
-    int stat;                   /* see STATs below                   */
-    struct process *procs;	/* list of processes                 */
+    int number; // job id
+    pid_t pgid;
+    struct process procs[2]; // list of procs
+    char text[2000]; // line submitted
 };
 
-// static void sig_int(int signo) {
-//     printf("Sending signals to group:%d\n",pid_ch1); // group id is pid of first in pipeline
-//     kill(-pid_ch1,SIGINT);
-// }
-// static void sig_tstp(int signo) {
-//     printf("Sending SIGTSTP to group:%d\n",pid_ch1); // group id is pid of first in pipeline
-//     kill(-pid_ch1,SIGTSTP);
-// }
+Job jobs[100];
+int job_num = 0;
+
+int cpid, cpid2, pid, status;
+
+static void sig_int(int signo) {
+    printf("Sending signals to group:%d\n",cpid); // group id is pid of first in pipeline
+    kill(-cpid,SIGINT);
+}
+static void sig_tstp(int signo) {
+    printf("Sending SIGTSTP to group:%d\n",cpid); // group id is pid of first in pipeline
+    kill(-cpid,SIGTSTP);
+}
 
 void builtins(char* cmd){
     if(strcmp(cmd, "fg") == 0){
-
+        int i = 0;
+        while(jobs[i] != NULL){
+            
+            i++;
+        }
     }
     else if(strcmp(cmd, "bg") == 0){
-
+        int i = 0;
+        while(jobs[i] != NULL){
+            if(jobs[i]->pgid == 1){
+                kill(-jobs[i]->pgid, SIGCONT);
+                break;
+            }
+            i++;
+        }
     }
     else if(strcmp(cmd, "jobs") == 0){
 
     }
 }
 
-// void redirects(int type, char* before[], char* file){
-//     if(type == 0){ // "<"
-//         int inputfd = open(file, O_RDONLY);
-//         if(errno == ENOENT){
-//             printf("Error opening file.\n");
-//             exit(1);
-//         }
-//         else{
-//             dup2(inputfd, STDIN_FILENO);
-//         }
-//     }
-//     else if(type == 1){ // ">"
-
-//     }
-//     else if(type == 2){ // "2>"
-
-//     }
-// }
-
 void eval_cmds(int len, int maxlen, char* arr[len][maxlen]){
-    int status;
     int i;
     int inputfd, outputfd, errfd;
     int pipefd[2];
-    int pid_ch1, pid_ch2, pid;
     int bg = 0;
+    // if need to send job to bg
     if(strcmp(arr[len-2][0], "&") == 0)
         bg = 1;
+
     int pipe_index = -1;
     for(i = 0; i < len; i++){
         if(arr[i][0] == NULL)
@@ -90,8 +85,9 @@ void eval_cmds(int len, int maxlen, char* arr[len][maxlen]){
             pipe_index = i;
     }
     if(pipe_index < 0){ // No pipe in the job
-        pid_t cpid = fork();
+        cpid = fork();
         if(cpid == 0){
+            setsid();
             for(i = 0; i < len; i++){
                 if(arr[i][0] == NULL)
                     break;
@@ -117,16 +113,45 @@ void eval_cmds(int len, int maxlen, char* arr[len][maxlen]){
             execvp(arr[0][0], arr[0]);
         }
         else{
-            wait(&status);
+            int count = 0;
+            while(count < 1){
+                pid = waitpid(-1, &status, WUNTRACED | WCONTINUED);
+                if (pid == -1)
+                {
+                    return;
+                }
+                if (WIFEXITED(status))
+                {
+                  count++;
+                }
+                else if (WIFSIGNALED(status))
+                {
+                    printf("child %d killed by signal %d\n", pid, WTERMSIG(status));
+                    kill(pid, SIGCONT);
+                    count++;
+                }
+                else if (WIFSTOPPED(status))
+                {
+                    // printf("%d stopped by signal %d\n", pid, WSTOPSIG(status));
+                    // printf("Sending CONT to %d\n", pid);
+                    // sleep(4); //sleep for 4 seconds before sending CONT
+                    // kill(pid, SIGCONT);
+                    return;
+                }
+                else if (WIFCONTINUED(status))
+                {
+                    printf("Continuing %d\n", pid);
+                }
+            }
         }
     }
     else{ // 1 pipe in the job
-        if (pipe(pipefd) != 0){
-            printf("Messed up pipe\n");
-            exit(1);
-        }
-        pid_t cpid = fork();
+        if (pipe(pipefd) < 0)
+	        fprintf(stderr,"pipe error");
+        cpid = fork();
         if(cpid == 0){
+            setsid(); // child 1 creates a new session and a new group and becomes leader with PID cpid
+            dup2(pipefd[1], STDOUT_FILENO);
             for(i = 0; i < len; i++){
                 if(arr[i][0] == NULL)
                     break;
@@ -149,17 +174,78 @@ void eval_cmds(int len, int maxlen, char* arr[len][maxlen]){
                     dup2(errfd, STDERR_FILENO);
                 }
             }
-            dup2(pipefd[1], 1);
             close(pipefd[0]);
-            
+            execvp(arr[0][0], arr[0]);
+            exit(1);
         }
         else{
-            pid_t cpid2 = fork();
+            cpid2 = fork();
             if(cpid2 == 0){
-
+                sleep(1);
+                setpgid(0, cpid);
+                dup2(pipefd[0], STDIN_FILENO);
+                for(i = pipe_index+1; i < len; i++){
+                    if(arr[i][0] == NULL)
+                        break;
+                    if(strcmp(arr[i][0],"<") == 0){
+                        inputfd = open(arr[i+1][0], O_RDONLY);
+                        if(errno == ENOENT){
+                            printf("Error opening file.\n");
+                            exit(1);
+                        }
+                        else{
+                            dup2(inputfd, STDIN_FILENO);
+                        }
+                    }
+                    if(strcmp(arr[i][0],">") == 0){
+                        outputfd = open(arr[i+1][0], O_CREAT | O_WRONLY, S_IRGRP | S_IRUSR | S_IWGRP | S_IWUSR);
+                        dup2(outputfd, STDOUT_FILENO);
+                    }
+                    if(strcmp(arr[i][0],"2>") == 0){
+                        errfd = open(arr[i+1][0], O_CREAT | O_WRONLY, S_IRGRP | S_IRUSR | S_IWGRP | S_IWUSR);
+                        dup2(errfd, STDERR_FILENO);
+                    }
+                }
+                close(pipefd[1]);
+                execvp(arr[pipe_index+1][0], arr[pipe_index+1]);
+                exit(1);
             }
             else{
-
+                //close the pipe in the parent
+                close(pipefd[0]);
+                close(pipefd[1]);
+                if(bg){
+                }
+                int count = 0;
+                while (count < 2){
+                    pid = waitpid(-1, &status, WUNTRACED | WCONTINUED);
+                    if (pid == -1)
+                    {
+                      perror("waitpid");
+                      exit(EXIT_FAILURE);
+                    }
+            
+                    if (WIFEXITED(status))
+                    {
+                      count++;
+                    }
+                    else if (WIFSIGNALED(status))
+                    {
+                      printf("child %d killed by signal %d\n", pid, WTERMSIG(status));
+                      count++;
+                    }
+                    else if (WIFSTOPPED(status))
+                    {
+                      printf("%d stopped by signal %d\n", pid, WSTOPSIG(status));
+                      printf("Sending CONT to %d\n", pid);
+                      sleep(4); //sleep for 4 seconds before sending CONT
+                      kill(pid, SIGCONT);
+                    }
+                    else if (WIFCONTINUED(status))
+                    {
+                      printf("Continuing %d\n", pid);
+                    }
+                }
             }
         }
     }
@@ -247,7 +333,8 @@ void parse_stuff(int len, char* arr[]){
 void prompt(void){
     char buf[2000];
     printf("# ");
-    fgets(buf, 2000, stdin);
+    if(fgets(buf, 2000, stdin) == NULL)
+        exit(0);
     if(strcmp(buf, "fg") == 0 
         || strcmp(buf, "bg") == 0
         || strcmp(buf, "jobs") == 0){
@@ -275,6 +362,10 @@ void prompt(void){
 }
 
 int main (void) {
+    if (signal(SIGINT, sig_int) == SIG_ERR)
+        printf("signal(SIGINT) error");
+    if (signal(SIGTSTP, sig_tstp) == SIG_ERR)
+        printf("signal(SIGTSTP) error");
     while(1){
         prompt();
     }
